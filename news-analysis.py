@@ -43,15 +43,18 @@ from itertools import count
 # we use it to time our parser execution speed
 from timeit import default_timer as timer
 
+# for memory
+import pandas as pd
+
 # Use testnet (change to True) or live (change to False)?
-testnet = True
+testnet = False
 
 # get binance key and secret from environment variables for testnet and live
-api_key_test = os.getenv('binance_api_stalkbot_testnet')
-api_secret_test = os.getenv('binance_secret_stalkbot_testnet')
+api_key_test = '---'
+api_secret_test = '---'
 
-api_key_live = os.getenv('binance_api_stalkbot_live')
-api_secret_live = os.getenv('binance_secret_stalkbot_live')
+api_key_live = '---'
+api_secret_live = '---'
 
 # Authenticate with the client
 if testnet:
@@ -79,11 +82,16 @@ if testnet:
 keywords = {
     'XRP': ['ripple', 'xrp', 'XRP', 'Ripple', 'RIPPLE'],
     'BTC': ['BTC', 'bitcoin', 'Bitcoin', 'BITCOIN'],
+    'BCH': ['BCH', 'bitcoin cash', 'Bitcoin Cash', 'BITCOIN CASH'],
     'XLM': ['Stellar Lumens', 'XLM'],
-    #'BCH': ['Bitcoin Cash', 'BCH'],
-    'ETH': ['ETH', 'Ethereum'],
+    'ETH': ['ETH', 'Ethereum', 'ethereum'],
+    'ADA': ['ADA', 'Cardano', 'cardano'],
     'BNB' : ['BNB', 'Binance Coin'],
-    'LTC': ['LTC', 'Litecoin']
+    'LTC': ['LTC', 'Litecoin', 'litecoin'],
+    'DOGE': ['DOGE', 'Dogecoin', 'dogecoin'],
+    'DOT': ['DOT', 'Polkadot', 'polkadot'],
+    'XMR': ['XMR', 'Monero', 'monero'],
+    'LINK': ['LINK', 'Chainlink', 'chainlink', 'ChainLink'],
     }
 
 # The Buy amount in the PAIRING symbol, by default USDT
@@ -97,13 +105,13 @@ PAIRING = 'USDT'
 # define how positive the news should be in order to place a trade
 # the number is a compound of neg, neu and pos values from the nltk analysis
 # input a number between -1 and 1
-SENTIMENT_THRESHOLD = 0
-NEGATIVE_SENTIMENT_THRESHOLD = 0
+SENTIMENT_THRESHOLD = 0.2
+NEGATIVE_SENTIMENT_THRESHOLD = -0.2
 
 # define the minimum number of articles that need to be analysed in order
 # for the sentiment analysis to qualify for a trade signal
 # avoid using 1 as that's not representative of the overall sentiment
-MINUMUM_ARTICLES = 1
+MINUMUM_ARTICLES = 5
 
 # define how often to run the code (check for new + try to place trades)
 # in minutes
@@ -113,14 +121,17 @@ REPEAT_EVERY = 60
 # in hours
 HOURS_PAST = 24
 
+# show skipped indicator of >HOURS_PAST articles?
+SHOW_SKIPPED = True
+
+# reset compiled_sentiment every N iteration
+RESET_N_ITERATION = 24
+
 
 ############################################
 #        END OF USER INPUT VARIABLES       #
 #             Edit with care               #
 ############################################
-
-
-
 
 # coins that bought by the bot since its start
 coins_in_hand  = {}
@@ -239,7 +250,6 @@ with open('Crypto feeds.csv') as csv_file:
 # Make headlines global variable as it should be the same across all functions
 headlines = {'source': [], 'title': [], 'pubDate' : [] }
 
-
 async def get_feed_data(session, feed, headers):
     '''
     Get relevent data from rss feed, in async fashion
@@ -265,15 +275,17 @@ async def get_feed_data(session, feed, headers):
             time_between = datetime.now(pytz.utc) - published
 
             #print(f'Czas: {time_between.total_seconds() / (60 * 60)}')
-
-            if time_between.total_seconds() / (60 * 60) <= HOURS_PAST:
+            
+            if SHOW_SKIPPED and time_between.total_seconds() / (60 * 60) > HOURS_PAST:
+                print('SKIPPED: ' + channel)
+            elif time_between.total_seconds() / (60 * 60) <= HOURS_PAST:
                 # append the source
                 headlines['source'].append(feed)
                 # append the publication date
                 headlines['pubDate'].append(pubDate)
                 # append the title
                 headlines['title'].append(title)
-                print(channel)
+                print(channel + " | " + pubDate)
 
     except Exception as e:
         # Catch any error and also print it
@@ -488,21 +500,46 @@ def sell(compiled_sentiment, headlines_analysed):
         else:
             print(f'Sentiment not negative enough for {coin}, not enough headlines analysed or not enough {coin} to sell: {compiled_sentiment[coin]}, {headlines_analysed[coin]}')
 
+# give bot a memory
+def write_memory(compiled_sentiment, headlines_analysed):
 
+    data = {}
+    data['Date'] = time.strftime("%Y-%m-%d %H:%M:%S")
+
+    for coin in keywords:
+       try:
+          info = client.get_symbol_ticker(symbol=coin+PAIRING)
+          data[info['symbol'] + '-price'] = info['price']
+          data[info['symbol'] + '-sentiment'] = compiled_sentiment[coin]
+          data[info['symbol'] + '-headlines'] = headlines_analysed[coin]
+       except:
+          pass
+
+    df1  = pd.DataFrame(data, index=[0])
+
+    if os.path.isfile("memory.csv"):
+        df2 = pd.read_csv("memory.csv")
+        df = df2.append(df1, ignore_index=True)
+    else:
+        df = df1
+
+    df.to_csv('memory.csv',index=False)
+    
 def save_coins_in_hand_to_file():
     # abort saving if dictionary is empty
     if not coins_in_hand:
         return
-
     # save coins_in_hand to file
     with open(coins_in_hand_file_path, 'w') as file:
         json.dump(coins_in_hand, file, indent=4)
 
-
-
 if __name__ == '__main__':
     print('Press Ctrl-Q to stop the script')
     for i in count():
+        if i % RESET_N_ITERATION == 0 and RESET_N_ITERATION != 0 and i != 0:
+            compiled_sentiment = 0
+            headlines_analysed = 0
+            print('\nSENTIMENT HAS BEEN RESET!')
         compiled_sentiment, headlines_analysed = compound_average()
         print("\nBUY CHECKS:")
         buy(compiled_sentiment, headlines_analysed)
@@ -513,5 +550,6 @@ if __name__ == '__main__':
             if coins_in_hand[coin] > 0:
                 print(f'{coin}: {coins_in_hand[coin]}')
         save_coins_in_hand_to_file()
+        write_memory(compiled_sentiment, headlines_analysed)
         print(f'\nIteration {i}')
         time.sleep(60 * REPEAT_EVERY)
